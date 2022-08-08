@@ -1,0 +1,25 @@
+#include <dt-bindings/gpio/gpio.h>
+/ {
+	leds {
+		compatible = "gpio-leds";
+
+
+		gp_led_1: ledgp1 {
+			gpios =  <&gpio0 22 GPIO_ACTIVE_HIGH>;
+			label = "Green - LED1";
+		};
+	};
+
+
+	aliases {
+		ledgp1 = &gp_led_1;
+	};	
+
+	
+};
+
+
+
+       
+   
+
