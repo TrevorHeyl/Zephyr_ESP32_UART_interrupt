@@ -3,9 +3,11 @@
  */
 
 #include <string.h>
+#include <stdio.h>
 #include <zephyr.h>
 #include <drivers/gpio.h>
 #include <drivers/uart.h>
+#include <sys/ring_buffer.h>
 
 /**
  * @brief
@@ -17,19 +19,21 @@
 static const struct gpio_dt_spec ledgr = GPIO_DT_SPEC_GET(LEDGR_NODE, gpios);
 const struct device *uart_1 = DEVICE_DT_GET(UART1_NODE);
 
-/* queue to store up to 10 messages (aligned to 4-byte boundary) */
+/* Queue to store up to 10 messages (aligned to 4-byte boundary) */
 #define MSG_SIZE 32
 K_MSGQ_DEFINE(uart_msgq, MSG_SIZE, 10, 4);
 
+/* Ring buffers for Tx and RX uart handling */
+#define UART_TX_RING_BUFFER_SIZE			100
+#define UART_RX_RING_BUFFER_SIZE			100
+RING_BUF_DECLARE(uart_tx_buffer,UART_TX_RING_BUFFER_SIZE);   /* Can also declare more efficient buffers of modulo n bytes  RING_BUGGER_DECLARE_POW2 */
+RING_BUF_DECLARE(uart_rx_buffer,UART_RX_RING_BUFFER_SIZE);   
+
+
 /* UART data buffer */
 static char rx_buf[MSG_SIZE];
-static char tx_buf[MSG_SIZE];
 static char rx_msg_buf[MSG_SIZE];
 static int rx_buf_pos=0;
-static int tx_buf_pos=0;
-static int tx_buf_size=0;
-
-
  
 
 // // * @brief
@@ -47,22 +51,21 @@ static int tx_buf_size=0;
 
 /**
  * @brief
- * Print a null-terminated string character by character to the UART interface in a polled manner
+ * Print a null-terminated string character by character to the UART interface with interrupt mode
  *  */
 void print_uart(char *buf)
 {
-	int msg_len = strlen(buf);
+	uint32_t ret;
+	uint32_t length = (uint32_t)strlen(buf);
 
-	tx_buf_pos=0;
-	tx_buf_size=0;
-
-	//for (int i = 0; i < msg_len && i < MSG_SIZE; i++)
-	for (int i = 0; i < msg_len ; i++)
+	ret = ring_buf_put(&uart_tx_buffer,(uint8_t *)buf,(uint32_t)length);
+	if( ret != length)
 	{
-		tx_buf[tx_buf_size++] = *buf;
-		buf++;
+		// not enough space in buffer, handle partial print
+	} else
+	{
+		uart_irq_tx_enable(uart_1);
 	}
-	uart_irq_tx_enable(uart_1);
 }
 
 
@@ -74,21 +77,23 @@ void print_uart(char *buf)
  */
 void serial_cb(const struct device *dev, void *user_data)
 {
-	uint8_t c = 0;
+	uint8_t c ;
+	uint8_t tx_char[1];
+	uint32_t ret;
 
 	if (uart_irq_update(dev) && uart_irq_is_pending(dev) )
 	{
-		if (uart_irq_tx_ready(dev)  && (tx_buf_size > 0)  )
+		if (uart_irq_tx_ready(dev) )
 		{
-			//if (uart_fifo_fill(dev, (uint8_t *)&tx_buf[tx_buf_pos++],1 ) > 0 )
-			if (uart_fifo_fill(dev, (uint8_t *)(tx_buf+tx_buf_pos),1 ) > 0 )
-			{
-				tx_buf_size--;
-				tx_buf_pos++;
-			}
-			if (tx_buf_size == 0) 
+			
+			ret = ring_buf_get(&uart_tx_buffer,tx_char,1);
+			if ( ret != 1) 
 			{
 				uart_irq_tx_disable(dev);
+			}
+			else 
+			{
+				uart_fifo_fill(dev,tx_char,1);
 			}
 		}
 
@@ -144,10 +149,23 @@ void main(void)
 		// do some failed thing
 	}
 
+	/* Init ring buffers */
+	ring_buf_init(&uart_tx_buffer, UART_TX_RING_BUFFER_SIZE , uart_tx_buffer.buffer  );
+	ring_buf_reset(&uart_tx_buffer);
+	ring_buf_init(&uart_rx_buffer, UART_RX_RING_BUFFER_SIZE , uart_rx_buffer.buffer  );
+	ring_buf_reset(&uart_rx_buffer);
+
 	/* Configure interrupt and callback to receive data */
 	uart_irq_callback_user_data_set(uart_1, serial_cb, NULL);
 	uart_irq_rx_enable(uart_1);
-	//uart_irq_tx_enable(uart_1);
+	uart_irq_tx_disable(uart_1);
+
+
+
+	//gpio_pin_set_dt(&ledgr,1);
+	//k_msleep(1500);
+	//gpio_pin_set_dt(&ledgr,0);
+
 
 
 	while (1)
@@ -156,12 +174,9 @@ void main(void)
 		while (k_msgq_get(&uart_msgq, &rx_msg_buf, K_FOREVER) == 0)
 		{
 			print_uart("Message:");
-			k_msleep(100);
 			print_uart(rx_msg_buf);
-			k_msleep(100);
 			print_uart("\r\n");
-			k_msleep(100);
-			gpio_pin_toggle_dt(&ledgr);
+			
 		}
 	}
 }
